@@ -252,3 +252,17 @@ async def test_ocean_panel_does_not_decode_other_commands_as_uploads(device):
     await device.data_parse(_post(upload(pow_get_sys_load=6.0), command=0x19))
 
     assert device.load_system == 730.3
+
+
+async def test_ocean_panel_requests_full_upload_like_the_app(device):
+    """The panel streams circuits only after a full-upload request (app action 88)"""
+    await device.data_parse(_post(dev_apl_comm_pb2.DisplayPropertyUpload()))
+
+    await device._request_full_upload()
+
+    payload = device._conn.send_packet.await_args.args[0].payload
+    envelope = payload[25:36]
+    assert (envelope[4], envelope[5]) == (0xFE, 0x25)
+    request = dev_apl_comm_pb2.ActionCmd.FromString(payload[36:])
+    assert request.action_id == 88
+    assert request.active_display_property_full_upload is True
