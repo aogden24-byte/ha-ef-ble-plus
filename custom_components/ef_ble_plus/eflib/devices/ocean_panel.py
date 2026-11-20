@@ -1,5 +1,3 @@
-from bleak.backends.device import BLEDevice
-from bleak.backends.scanner import AdvertisementData
 from google.protobuf.message import DecodeError, Message
 
 from ..entity import controls
@@ -11,13 +9,7 @@ from ..props import (
 )
 from ..props.protobuf_field import TransformIfMissing
 from ..props.transforms import pround
-from ._v4_device import (
-    CircuitStatus,
-    GridStatus,
-    TelemetryFrame,
-    V4ProtocolDevice,
-    V4ProtocolRouting,
-)
+from ._v4_device import CircuitStatus, GridStatus, TelemetryFrame, V4ProtocolDevice
 
 pb = proto_attr_mapper(dev_apl_comm_pb2.DisplayPropertyUpload)
 pb_rt = proto_attr_mapper(dev_apl_comm_pb2.RuntimePropertyUpload)
@@ -36,12 +28,6 @@ class Device(V4ProtocolDevice):
 
     NUM_OF_CIRCUITS = 40
     _TELEMETRY_SRC = 0x30
-
-    # The panel streams circuit samples only for a while after a client asks for a
-    # full upload, which the EcoFlow app does each time its home screen opens. Without
-    # the request, circuits stay silent for 20+ minutes at a time.
-    _FULL_UPLOAD_INTERVAL = 60
-    _ACTIVE_ONCE_UPLOAD_ACTION = 88
 
     battery_level = pb_field(pb.cms_batt_soc, pround(2))
     battery_power = pb_field(pb.pow_get_bp_cms, pround(2))
@@ -168,26 +154,6 @@ class Device(V4ProtocolDevice):
         config = self._build_circuit_power_config(circuit_id, enable)
         if config is not None:
             await self._send_config_packet(config)
-
-    def __init__(
-        self, ble_dev: BLEDevice, adv_data: AdvertisementData, sn: str
-    ) -> None:
-        super().__init__(ble_dev, adv_data, sn)
-        self.add_timer_task(
-            self._request_full_upload, interval=self._FULL_UPLOAD_INTERVAL
-        )
-
-    async def _request_full_upload(self) -> None:
-        if not self._routing.has_post:
-            return
-        request = dev_apl_comm_pb2.ActionCmd(
-            action_id=self._ACTIVE_ONCE_UPLOAD_ACTION,
-            active_display_property_full_upload=True,
-        )
-        packet = self._routing.write_packet(
-            request.SerializeToString(), cmd_id=V4ProtocolRouting.ACTION_COMMAND
-        )
-        await self.send_packet(packet, wait_for_response=False)
 
     def _parse_telemetry(self, frame: TelemetryFrame) -> None:
         upload_type = frame.upload_type

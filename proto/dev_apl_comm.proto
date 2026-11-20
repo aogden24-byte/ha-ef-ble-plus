@@ -1120,15 +1120,6 @@ message CloudDispatchCmd {
   repeated CloudDispatchCmdParam cloud_dispatch_cmd_param = 1;
 }
 
-// One-shot request the EcoFlow app sends the system's main device (the panel) when its
-// home screen opens: action 88 with the full display upload flag. Field numbers are the
-// app's main-device `ActionCmd` (HomeEnergy bundle); only the fields used are declared.
-message ActionCmd {
-  optional uint32 action_id = 1;
-  optional bool active_display_property_full_upload = 9;
-  optional bool active_runtime_property_full_upload = 10;
-}
-
 message ConfigWrite {
   optional bool cfg_power_off = 3;
   optional bool cfg_power_on = 4;

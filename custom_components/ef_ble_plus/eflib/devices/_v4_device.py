@@ -91,11 +91,11 @@ class V4ProtocolRouting:
     HEADER_LEN = 22  # device SN fragment (9) + envelope (13), on reads
     _SERIAL_FRAGMENT_LEN = 9
     _COMMAND_OFFSET = 15  # envelope cmd_set, cmd_id
-    PROPERTY_WRITE = 0x11
-    ACTION_COMMAND = 0x25
     _WRITE_CMD_FLAGS = 0x10
-    _WRITE_CMD_SET = 0xFE
     _WRITE_ENVELOPE_PREFIX = bytes([0x40, 0x03, 0x03])
+    _WRITE_ENVELOPE_MID = bytes(
+        [0xFE, 0x11, 0x00]
+    )  # cmd_set 0xFE, cmd_id 0x11, reserved
     _WRITE_ENVELOPE_SUFFIX = bytes([0x21, 0x01, 0x0B, 0x01])
 
     def __init__(self, serial: str) -> None:
@@ -130,23 +130,15 @@ class V4ProtocolRouting:
         self._write_seq = (self._write_seq + 1) & 0xFF
         return self._write_seq
 
-    @property
-    def has_post(self) -> bool:
-        """Whether a telemetry post has been seen to mirror writes on"""
-        return self._post_template is not None
-
-    def write_packet(
-        self, config_bytes: bytes, *, cmd_id: int = PROPERTY_WRITE
-    ) -> Packet | PacketV4:
-        """Build the frame for a serialized `ConfigWrite` (or another 0xFE command)"""
+    def write_packet(self, config_bytes: bytes) -> Packet | PacketV4:
+        """Build the control-write frame for a serialized `ConfigWrite`"""
         if self._post_template is None:
             # No telemetry post captured yet: plain v3 fallback.
-            return Packet(
-                0x21, 0x60, self._WRITE_CMD_SET, cmd_id, config_bytes, 0x01, 0x01, 0x13
-            )
+            return Packet(0x21, 0x60, 0xFE, 0x11, config_bytes, 0x01, 0x01, 0x13)
         envelope = (
             self._WRITE_ENVELOPE_PREFIX
-            + bytes([self._next_seq(), self._WRITE_CMD_SET, cmd_id, 0x00])
+            + bytes([self._next_seq()])
+            + self._WRITE_ENVELOPE_MID
             + self._WRITE_ENVELOPE_SUFFIX
         )
         serial9 = self._serial[-self._SERIAL_FRAGMENT_LEN :].encode("ascii")
