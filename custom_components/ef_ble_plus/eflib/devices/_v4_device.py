@@ -50,6 +50,29 @@ class CircuitStatus(IntFieldValue):
     EM_STOP = 3
 
 
+# Envelope (cmd_set, cmd_id) of the two property uploads. The device sends other
+# commands on the same channel whose bodies reuse upload field numbers for unrelated
+# values, so only these are decoded as uploads.
+_UPLOAD_MESSAGES: dict[tuple[int, int], type[Message]] = {
+    (0xFE, 0x15): dev_apl_comm_pb2.DisplayPropertyUpload,
+    (0xFE, 0x16): dev_apl_comm_pb2.RuntimePropertyUpload,
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class TelemetryFrame:
+    """One V4 telemetry post: sender SN fragment, envelope command and protobuf body"""
+
+    serial: str
+    command: tuple[int, int]
+    body: bytes
+
+    @property
+    def upload_type(self) -> type[Message] | None:
+        """The property upload this frame carries, or `None` for any other command"""
+        return _UPLOAD_MESSAGES.get(self.command)
+
+
 class V4ProtocolRouting:
     """
     V4 panel routing layer that wraps the protobuf inside the v4 payload
@@ -67,6 +90,7 @@ class V4ProtocolRouting:
 
     HEADER_LEN = 22  # device SN fragment (9) + envelope (13), on reads
     _SERIAL_FRAGMENT_LEN = 9
+    _COMMAND_OFFSET = 15  # envelope cmd_set, cmd_id
     _WRITE_CMD_FLAGS = 0x10
     _WRITE_ENVELOPE_PREFIX = bytes([0x40, 0x03, 0x03])
     _WRITE_ENVELOPE_MID = bytes(
@@ -80,11 +104,17 @@ class V4ProtocolRouting:
         self._envelope_template: bytes | None = None
         self._write_seq = 0x20
 
+    @property
+    def serial_fragment(self) -> str:
+        """The SN fragment this device's own posts carry"""
+        return self._serial[-self._SERIAL_FRAGMENT_LEN :]
+
     @classmethod
-    def split(cls, payload: bytes) -> tuple[str, bytes]:
-        """Split a v4 application payload into (device SN fragment, protobuf body)"""
+    def split(cls, payload: bytes) -> TelemetryFrame:
+        """Split a v4 application payload into its routing header and protobuf body"""
         serial = payload[: cls._SERIAL_FRAGMENT_LEN].decode("ascii", errors="replace")
-        return serial, payload[cls.HEADER_LEN :]
+        cmd_set, cmd_id = payload[cls._COMMAND_OFFSET : cls._COMMAND_OFFSET + 2]
+        return TelemetryFrame(serial, (cmd_set, cmd_id), payload[cls.HEADER_LEN :])
 
     def remember_post(self, packet: PacketV4) -> None:
         """Capture the post as the transport template + routing envelope (for seq)"""
@@ -128,7 +158,7 @@ class V4ProtocolDevice(DeviceBase, ProtobufProps):
     Base for EcoFlow V4 smart-panel devices
 
     Subclasses set `SN_PREFIX`, `_TELEMETRY_SRC` (the module address the device streams
-    its own uploads from) and implement `_parse_telemetry` to decode the protobuf body.
+    its own uploads from) and implement `_parse_telemetry` to decode a telemetry frame.
     """
 
     _KEEPALIVE_INTERVAL = 20
@@ -152,8 +182,8 @@ class V4ProtocolDevice(DeviceBase, ProtobufProps):
         return sn[:4] in cls.SN_PREFIX
 
     @abstractmethod
-    def _parse_telemetry(self, body: bytes) -> None:
-        """Decode a deobfuscated protobuf body into device fields"""
+    def _parse_telemetry(self, frame: TelemetryFrame) -> None:
+        """Decode a deobfuscated telemetry frame into device fields"""
 
     async def _send_keepalive(self) -> None:
         await self._time_commands.sendRTCCheck()
@@ -230,8 +260,7 @@ class V4ProtocolDevice(DeviceBase, ProtobufProps):
                 if src == self._TELEMETRY_SRC:
                     if isinstance(packet, PacketV4):
                         self._routing.remember_post(packet)
-                    _, body = self._routing.split(packet.payload)
-                    self._parse_telemetry(body)
+                    self._parse_telemetry(self._routing.split(packet.payload))
                 # any other source is sub-device telemetry forwarded by the device
                 processed = True
             case _, 0x35, 0x01, Packet.NET_BLE_COMMAND_CMD_SET_RET_TIME:

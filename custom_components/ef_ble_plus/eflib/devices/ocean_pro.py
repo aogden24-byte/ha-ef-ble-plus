@@ -8,7 +8,7 @@ from ..packet import Packet
 from ..pb import dev_apl_comm_pb2, jt_s1_sys_pb2
 from ..props import pb_field, pb_field_group, proto_attr_mapper
 from ..props.transforms import out_power, pround
-from ._v4_device import GridStatus, V4ProtocolDevice
+from ._v4_device import GridStatus, TelemetryFrame, V4ProtocolDevice
 
 pb = proto_attr_mapper(dev_apl_comm_pb2.DisplayPropertyUpload)
 pb_rt = proto_attr_mapper(dev_apl_comm_pb2.RuntimePropertyUpload)
@@ -168,9 +168,9 @@ class Device(V4ProtocolDevice):
             wait_for_response=False,
         )
 
-    def _parse_telemetry(self, body: bytes) -> None:
-        self.update_from_bytes(dev_apl_comm_pb2.DisplayPropertyUpload, body)
-        self.update_from_bytes(dev_apl_comm_pb2.RuntimePropertyUpload, body)
+    def _parse_telemetry(self, frame: TelemetryFrame) -> None:
+        if (upload_type := frame.upload_type) is not None:
+            self.update_from_bytes(upload_type, frame.body)
 
     async def _send_s1_config(self, cmd_id: int, message: Message) -> None:
         await self.send_packet(

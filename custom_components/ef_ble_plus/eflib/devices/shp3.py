@@ -16,7 +16,7 @@ from ..props import (
 from ..props.enums import IntFieldValue
 from ..props.protobuf_field import TransformIfMissing
 from ..props.transforms import out_power, pround
-from ._v4_device import CircuitStatus, GridStatus, V4ProtocolDevice
+from ._v4_device import CircuitStatus, GridStatus, TelemetryFrame, V4ProtocolDevice
 
 pb = proto_attr_mapper(dev_apl_comm_pb2.DisplayPropertyUpload)
 pb_cfg = proto_attr_mapper(dev_apl_comm_pb2.ConfigWrite)
@@ -318,8 +318,8 @@ class Device(V4ProtocolDevice):
             return self._mode_panel
         return self._mode_generic
 
-    def _parse_telemetry(self, body: bytes) -> None:
-        self.update_from_bytes(dev_apl_comm_pb2.DisplayPropertyUpload, body)
+    def _parse_telemetry(self, frame: TelemetryFrame) -> None:
+        self.update_from_bytes(dev_apl_comm_pb2.DisplayPropertyUpload, frame.body)
 
     @controls.battery(
         battery_charge_limit_min,

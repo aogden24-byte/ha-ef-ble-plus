@@ -27,7 +27,7 @@ def packet_sequence():
     # data: device serials masked to "XXXXXXX01", timezone reset to UTC, circuit names
     # replaced with generic "Circuit N" labels. All telemetry values are unchanged.
     return [
-        # V4 single-field DisplayPropertyUpload (plug_in_info_acp_charger_flag)
+        # V4 envelope command 0x19, which is not a property upload
         "aa042d008f011301afc6dcb8bfd4cfbfd6d6d6d6d6d6d6bebfaf8fce8d8da8709775858faf8f0e898803898e8e7ecc1b898e8efecc41bd",
         # V4 RuntimePropertyUpload (firmware ver, EMS state, inverter frequency)
         "aa045100d1011301f19882e6e18a91e188888888888888e0e1f1d190d3d3f62ec63adbd1f1d150db575550c078c23077c260c23004d368c27027e610c2702eda70f1d0508d409e5d8dd0d0a092458dabc4aa924d8dd0d0a09298e2",
@@ -47,7 +47,7 @@ def device(mocker: MockerFixture):
     ble_dev = mocker.Mock()
     ble_dev.address = "AA:BB:CC:DD:EE:FF"
     adv_data = mocker.MagicMock()
-    device = Device(ble_dev, adv_data, "HR61XXXXXXXXX001")
+    device = Device(ble_dev, adv_data, "HR61XXXXXXXXXX01")
     device._conn = mocker.AsyncMock()
     device._conn._user_id = "test-user-id"
     return device
@@ -108,7 +108,6 @@ async def test_ocean_panel_exact_values_from_known_packets(device, packet_sequen
     assert device.inverter_frequency == 60.0
     assert device.grid_connection_status is GridStatus.GRID_IN
     assert device.grid_is_energized is True
-    assert device.plugged_in_ac is True
 
 
 async def test_ocean_panel_decodes_circuit_status_and_names(device, packet_sequence):
@@ -165,34 +164,68 @@ async def test_ocean_panel_registers_userid_once_on_time_request(
     ]
 
 
-def _telemetry(**fields) -> bytes:
-    return dev_apl_comm_pb2.DisplayPropertyUpload(**fields).SerializeToString()
+PANEL_SERIAL = b"XXXXXXX01"
+INVERTER_SERIAL = b"XXXXXXX02"
+DISPLAY_UPLOAD = 0x15
+RUNTIME_UPLOAD = 0x16
 
 
-def test_ocean_panel_reports_external_pv_inverter_power(device):
-    device._parse_telemetry(
-        _telemetry(pow_exter_pv_inv_in_w=194.34, pow_get_sys_load=540.0)
+def _post(
+    message,
+    command: int = DISPLAY_UPLOAD,
+    serial: bytes = PANEL_SERIAL,
+) -> PacketV4:
+    """A telemetry post in the routing layout of the captures above"""
+    envelope = (
+        bytes.fromhex("210140030326fe") + bytes([command]) + bytes.fromhex("480b012101")
+    )
+    return PacketV4(
+        src=0x30,
+        dst=0x5B,
+        cmd_set=0x40,
+        cmd_id=0x30,
+        payload=serial + envelope + message.SerializeToString(),
+    )
+
+
+async def test_ocean_panel_reports_external_pv_inverter_power(device):
+    await device.data_parse(
+        _post(
+            dev_apl_comm_pb2.DisplayPropertyUpload(
+                pow_exter_pv_inv_in_w=194.34, pow_get_sys_load=540.0
+            )
+        )
     )
 
     assert device.external_pv_power == 194.34
 
 
-def test_ocean_panel_external_pv_holds_value_when_an_upload_omits_it(device):
+async def test_ocean_panel_external_pv_holds_value_when_an_upload_omits_it(device):
     """Uploads are incremental, so one without the field must not reset it"""
-    device._parse_telemetry(_telemetry(pow_exter_pv_inv_in_w=31.43))
-    device._parse_telemetry(_telemetry(pow_get_sys_load=528.0))
+    upload = dev_apl_comm_pb2.DisplayPropertyUpload
+    await device.data_parse(_post(upload(pow_exter_pv_inv_in_w=31.43)))
+    await device.data_parse(_post(upload(pow_get_sys_load=528.0)))
 
     assert device.external_pv_power == 31.43
 
 
-def test_ocean_panel_relays_inverter_pv_strings(device):
-    device._parse_telemetry(
-        _telemetry(dt_pv_pwr_current=2825.8, dt_pv2_pwr_current=2538.7)
+async def test_ocean_panel_relays_inverter_pv_strings(device):
+    await device.data_parse(
+        _post(
+            dev_apl_comm_pb2.DisplayPropertyUpload(
+                dt_pv_pwr_current=2825.8, dt_pv2_pwr_current=2538.7
+            ),
+            serial=INVERTER_SERIAL,
+        )
     )
-    device._parse_telemetry(
-        dev_apl_comm_pb2.RuntimePropertyUpload(
-            dt_pv_vol_current=307.0, dt_pv_cur_current=10.6, dt_pv8_vol_current=52.1
-        ).SerializeToString()
+    await device.data_parse(
+        _post(
+            dev_apl_comm_pb2.RuntimePropertyUpload(
+                dt_pv_vol_current=307.0, dt_pv_cur_current=10.6, dt_pv8_vol_current=52.1
+            ),
+            command=RUNTIME_UPLOAD,
+            serial=INVERTER_SERIAL,
+        )
     )
 
     assert device.pv_power_1 == 2825.8
@@ -200,3 +233,22 @@ def test_ocean_panel_relays_inverter_pv_strings(device):
     assert device.pv_voltage_1 == 307.0
     assert device.pv_current_1 == 10.6
     assert device.pv_voltage_8 == 52.1
+
+
+async def test_ocean_panel_ignores_relayed_inverter_totals(device):
+    upload = dev_apl_comm_pb2.DisplayPropertyUpload
+    await device.data_parse(_post(upload(pow_get_sys_load=730.3, cms_batt_soc=80.0)))
+    await device.data_parse(
+        _post(upload(pow_get_sys_load=683.8, cms_batt_soc=79.0), serial=INVERTER_SERIAL)
+    )
+
+    assert device.load_system == 730.3
+    assert device.battery_level == 80.0
+
+
+async def test_ocean_panel_does_not_decode_other_commands_as_uploads(device):
+    upload = dev_apl_comm_pb2.DisplayPropertyUpload
+    await device.data_parse(_post(upload(pow_get_sys_load=730.3)))
+    await device.data_parse(_post(upload(pow_get_sys_load=6.0), command=0x19))
+
+    assert device.load_system == 730.3

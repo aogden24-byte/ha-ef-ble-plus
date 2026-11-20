@@ -1,3 +1,5 @@
+from google.protobuf.message import DecodeError, Message
+
 from ..entity import controls
 from ..pb import dev_apl_comm_pb2
 from ..props import (
@@ -7,10 +9,11 @@ from ..props import (
 )
 from ..props.protobuf_field import TransformIfMissing
 from ..props.transforms import pround
-from ._v4_device import CircuitStatus, GridStatus, V4ProtocolDevice
+from ._v4_device import CircuitStatus, GridStatus, TelemetryFrame, V4ProtocolDevice
 
 pb = proto_attr_mapper(dev_apl_comm_pb2.DisplayPropertyUpload)
 pb_rt = proto_attr_mapper(dev_apl_comm_pb2.RuntimePropertyUpload)
+_PV_STRING_FIELD_PREFIX = "dt_pv"
 
 
 class Device(V4ProtocolDevice):
@@ -45,7 +48,6 @@ class Device(V4ProtocolDevice):
 
     grid_connection_status = pb_field(pb.grid_connection_sta, GridStatus.from_value)
     grid_is_energized = pb_field(pb.grid_is_energized)
-    plugged_in_ac = pb_field(pb.plug_in_info_acp_charger_flag)
 
     inverter_frequency = pb_field(pb_rt.third_inv_offgrid_ctrl_freq_curr, pround(2))
 
@@ -153,6 +155,28 @@ class Device(V4ProtocolDevice):
         if config is not None:
             await self._send_config_packet(config)
 
-    def _parse_telemetry(self, body: bytes) -> None:
-        self.update_from_bytes(dev_apl_comm_pb2.DisplayPropertyUpload, body)
-        self.update_from_bytes(dev_apl_comm_pb2.RuntimePropertyUpload, body)
+    def _parse_telemetry(self, frame: TelemetryFrame) -> None:
+        upload_type = frame.upload_type
+        if upload_type is None:
+            return
+        if frame.serial == self._routing.serial_fragment:
+            self.update_from_bytes(upload_type, frame.body)
+            return
+        self._update_relayed_pv_strings(upload_type, frame.body)
+
+    def _update_relayed_pv_strings(
+        self, upload_type: type[Message], body: bytes
+    ) -> None:
+        # The panel also relays the inverter's own uploads. Their system totals (load,
+        # PV sum, battery, SOC) are the inverter's view and differ from the panel's, so
+        # only the PV string values are taken from them.
+        try:
+            relayed = upload_type.FromString(body)
+        except DecodeError:
+            self._logger.debug("Failed to decode relayed %s", upload_type.__name__)
+            return
+        pv_strings = upload_type()
+        for field, value in relayed.ListFields():
+            if field.name.startswith(_PV_STRING_FIELD_PREFIX):
+                setattr(pv_strings, field.name, value)
+        self.update_from_message(pv_strings)
