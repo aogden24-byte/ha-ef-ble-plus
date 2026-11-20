@@ -177,14 +177,12 @@ def test_ocean_panel_reports_external_pv_inverter_power(device):
     assert device.external_pv_power == 194.34
 
 
-def test_ocean_panel_external_pv_reads_zero_when_the_panel_omits_it(device):
-    """The panel stops sending the field once the PV circuit turns net-consuming"""
-    device._parse_telemetry(
-        _telemetry(pow_exter_pv_inv_in_w=194.34, pow_get_sys_load=540.0)
-    )
-    device._parse_telemetry(_telemetry(pow_get_sys_load=2602.0))
+def test_ocean_panel_external_pv_holds_value_when_an_upload_omits_it(device):
+    """Uploads are incremental, so one without the field must not reset it"""
+    device._parse_telemetry(_telemetry(pow_exter_pv_inv_in_w=31.43))
+    device._parse_telemetry(_telemetry(pow_get_sys_load=528.0))
 
-    assert device.external_pv_power == 0.0
+    assert device.external_pv_power == 31.43
 
 
 def test_ocean_panel_relays_inverter_pv_strings(device):

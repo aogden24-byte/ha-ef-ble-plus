@@ -35,15 +35,10 @@ class Device(V4ProtocolDevice):
     sub_panel_load = pb_field(pb.pow_sub_panel_load_w, pround(2))
     ev_load = pb_field(pb.pow_ev_load_w, pround(2))
     pv_power_sum = pb_field(pb.pow_get_pv_sum, pround(2))
-    # Power on circuits assigned "Third-party solar inverter" in the installer app. The
-    # panel omits it at zero (a net-consuming circuit reports nothing), like the
-    # circuit samples, so a frame without it means zero rather than "unchanged".
-    external_pv_power = pb_field(
-        pb.pow_exter_pv_inv_in_w,
-        TransformIfMissing[float, float](
-            lambda v: round(v, 2) if v is not None else 0.0
-        ),
-    )
+    # Power on circuits assigned "Third-party solar inverter" in the installer app.
+    # Uploads are incremental and a live capture shows uploads omitting it while it is
+    # non-zero, so a missing field means "unchanged", not zero.
+    external_pv_power = pb_field(pb.pow_exter_pv_inv_in_w, pround(2))
 
     remaining_time_charging = pb_field(pb.cms_chg_rem_time)
     remaining_time_discharging = pb_field(pb.cms_dsg_rem_time)
