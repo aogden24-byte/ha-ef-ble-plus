@@ -1,0 +1,11 @@
+EF BLE Plus
+Copyright 2026 Andrew Ogden
+
+This product is derived from ha-ef-ble (https://github.com/rabits/ha-ef-ble),
+Copyright its contributors, including Rabit (rabits) and GnoX, licensed under the
+Apache License, Version 2.0. The OCEAN Pro and OCEAN Panel support is based on GnoX's
+`ocean-pro-1.1.1` branch of https://github.com/GnoX/ha-ef-ble.
+
+This project is not affiliated with, endorsed by, or supported by EcoFlow. "EcoFlow",
+"OCEAN" and "STREAM" are trademarks of their respective owner and are used only to
+identify compatible devices.

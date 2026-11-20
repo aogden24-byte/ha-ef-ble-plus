@@ -1,0 +1,448 @@
+from collections.abc import Callable
+from typing import Any
+
+from ..entity import controls
+from ..entity.base import dynamic
+from ..pb import dev_apl_comm_pb2
+from ..props import (
+    Field,
+    computed_field,
+    field_group,
+    pb_field,
+    pb_field_group,
+    pb_indexed_attr,
+    proto_attr_mapper,
+)
+from ..props.enums import IntFieldValue
+from ..props.protobuf_field import TransformIfMissing
+from ..props.transforms import out_power, pround
+from ._v4_device import CircuitStatus, GridStatus, V4ProtocolDevice
+
+pb = proto_attr_mapper(dev_apl_comm_pb2.DisplayPropertyUpload)
+pb_cfg = proto_attr_mapper(dev_apl_comm_pb2.ConfigWrite)
+
+
+class OperatingMode(IntFieldValue):
+    """SHP3 energy-strategy operating mode (`CfgEnergyStrategyOperateMode` subfields)"""
+
+    UNKNOWN = -1
+
+    NONE = 0  # no operating mode selected ("Backup")
+    SELF_POWERED = 1
+    SCHEDULED = 2
+    INTELLIGENT = 6
+
+
+class BackupChannelType(IntFieldValue):
+    UNKNOWN = -1
+
+    NONE = 0
+    BATTERY = 1
+    OIL = 2
+    STATION_CHARGER = 3
+
+
+def _operating_mode_from_message(
+    message: (
+        dev_apl_comm_pb2.CfgEnergyStrategyOperateMode
+        | dev_apl_comm_pb2.CfgPanelEnergyStrategyOperateMode
+    ),
+) -> OperatingMode:
+    if message.operate_self_powered_open:
+        return OperatingMode.SELF_POWERED
+    if message.operate_scheduled_open:
+        return OperatingMode.SCHEDULED
+    if message.operate_intelligent_schedule_mode_open:
+        return OperatingMode.INTELLIGENT
+    return OperatingMode.NONE
+
+
+def _channel_enabled(info: dev_apl_comm_pb2.BackupChInfo) -> bool | None:
+    if not info.ch_dev_type:
+        return None
+    return info.ch_sta == 1
+
+
+def _channel_type(info: dev_apl_comm_pb2.BackupChInfo) -> "BackupChannelType | None":
+    if not info.ch_dev_type:
+        return None
+    return BackupChannelType.from_value(info.ch_dev_type)
+
+
+def _channel_force_charging(info: dev_apl_comm_pb2.BackupChInfo) -> bool | None:
+    if not info.ch_dev_type:
+        return None
+    return info.force_chg_sta == 1
+
+
+def _channel_signal_connected(info: dev_apl_comm_pb2.BackupChInfo) -> bool | None:
+    if not info.ch_dev_type:
+        return None
+    return info.signal_line_sta == 1
+
+
+def _backup_channel_dev_id(info: dev_apl_comm_pb2.BackupChInfo) -> int | None:
+    return info.ch_dev_id or None
+
+
+def _channel_battery(slot_template: str) -> Callable[[int], Field[Any]]:
+    """Factory resolving a backup channel to its battery info slot via `ch_dev_id`"""
+
+    def factory(channel: int) -> Field[Any]:
+        @computed_field
+        def channel_value(self: "Device") -> Any:
+            dev_id = getattr(self, f"_ch{channel}_dev_id")
+            if dev_id is None or not 1 <= dev_id <= Device.NUM_OF_BATTERIES:
+                return None
+            return getattr(self, slot_template.format(n=dev_id))
+
+        return channel_value
+
+    return factory
+
+
+class Device(V4ProtocolDevice):
+    """Smart Home Panel 3"""
+
+    SN_PREFIX = (b"HR62", b"HR63", b"HR6C")
+    NAME_PREFIX = "EF-SHP3"
+
+    NUM_OF_CIRCUITS = 32
+    NUM_OF_CHANNELS = 3
+    NUM_OF_BATTERIES = 10
+    _TELEMETRY_SRC = 0x32
+
+    battery_level = pb_field(pb.cms_batt_soc, pround(2))
+    remaining_time_charging = pb_field(pb.cms_chg_rem_time)
+    remaining_time_discharging = pb_field(pb.cms_dsg_rem_time)
+
+    battery_charge_limit_min = pb_field(pb.cms_min_dsg_soc)
+    battery_charge_limit_max = pb_field(pb.cms_max_chg_soc)
+    backup_reserve_level = pb_field(pb.backup_reverse_soc)
+
+    l1_power = pb_field(pb.grid_connection_power_L1, pround(2))
+    l2_power = pb_field(pb.grid_connection_power_L2, pround(2))
+    l3_power = pb_field(pb.grid_connection_power_L3, pround(2))
+
+    l1_voltage = pb_field(pb.grid_connection_vol_L1, pround(1))
+    l2_voltage = pb_field(pb.grid_connection_vol_L2, pround(1))
+    l3_voltage = pb_field(pb.grid_connection_vol_L3, pround(1))
+
+    l1_current = pb_field(pb.grid_connection_amp_L1, pround(2))
+    l2_current = pb_field(pb.grid_connection_amp_L2, pround(2))
+    l3_current = pb_field(pb.grid_connection_amp_L3, pround(2))
+
+    grid_connection_status = pb_field(pb.grid_connection_sta, GridStatus.from_value)
+    grid_is_energized = pb_field(pb.grid_is_energized)
+
+    circuit_power = pb_field_group(
+        pb.load_ch1_sample_info.load_ch_power,
+        match="load_ch{n}_sample_info",
+        count=NUM_OF_CIRCUITS,
+        transform=TransformIfMissing[float, float](
+            lambda v: round(v, 2) if v is not None else 0.0
+        ),
+        name_template="circuit_power_{n}",
+    )
+    circuit_current = pb_field_group(
+        pb.load_ch1_sample_info.load_ch_curr,
+        match="load_ch{n}_sample_info",
+        count=NUM_OF_CIRCUITS,
+        transform=pround(2),
+        name_template="circuit_current_{n}",
+    )
+    circuit_voltage = pb_field_group(
+        pb.load_ch1_sample_info.load_ch_vol,
+        match="load_ch{n}_sample_info",
+        count=NUM_OF_CIRCUITS,
+        transform=pround(1),
+        name_template="circuit_voltage_{n}",
+    )
+
+    circuit_status = pb_field_group(
+        pb.load_ch1_sta.load_sta,
+        match="load_ch{n}_sta",
+        count=NUM_OF_CIRCUITS,
+        transform=TransformIfMissing(lambda v: CircuitStatus.from_value(v or 0)),
+        name_template="circuit_status_{n}",
+    )
+    circuit_is_enabled = pb_field_group(
+        pb.load_ch1_sta.load_sta,
+        match="load_ch{n}_sta",
+        count=NUM_OF_CIRCUITS,
+        transform=TransformIfMissing(lambda v: (v or 0) in (1, 2)),
+        name_template="circuit_is_enabled_{n}",
+    )
+    circuit_name = pb_field_group(
+        pb.load_ch1_sta.ch_name,
+        match="load_ch{n}_sta",
+        count=NUM_OF_CIRCUITS,
+        name_template="circuit_name_{n}",
+    )
+    # The panel omits the splitphase message entirely for single-pole circuits, so
+    # read the message itself: absent means "not split" (0) once the circuit's
+    # load_ch{n}_sta has been received
+    circuit_split_link = pb_field_group(
+        pb.load_ch1_sta.splitphase,
+        match="load_ch{n}_sta",
+        count=NUM_OF_CIRCUITS,
+        transform=TransformIfMissing(lambda split: split.link_ch if split else 0),
+        name_template="circuit_split_link_{n}",
+    )
+    circuit_split_info_loaded = pb_field_group(
+        pb.load_ch1_sta.splitphase,
+        match="load_ch{n}_sta",
+        count=NUM_OF_CIRCUITS,
+        transform=TransformIfMissing(lambda _: True),
+        name_template="circuit_split_info_loaded_{n}",
+    )
+
+    load_system = pb_field(pb.pow_get_sys_load, pround(2))
+    load_from_grid = pb_field(pb.pow_get_sys_grid, pround(2))
+    battery_power = pb_field(pb.pow_get_bp_cms, pround(2))
+    pv_power_sum = pb_field(pb.pow_get_pv_sum, pround(2))
+
+    _battery_slot_sn = pb_field_group(
+        pb.panel_generate_energy_battery_info_1.sn,
+        match="panel_generate_energy_battery_info_{n}",
+        count=NUM_OF_BATTERIES,
+        name_template="_battery_slot_sn_{n}",
+    )
+    _battery_slot_soc = pb_field_group(
+        pb.panel_generate_energy_battery_info_1.soc_cms,
+        match="panel_generate_energy_battery_info_{n}",
+        count=NUM_OF_BATTERIES,
+        transform=pround(2),
+        name_template="_battery_slot_soc_{n}",
+    )
+    _battery_slot_power = pb_field_group(
+        pb.panel_generate_energy_battery_info_1.ac_pwr,
+        match="panel_generate_energy_battery_info_{n}",
+        count=NUM_OF_BATTERIES,
+        transform=out_power,
+        name_template="_battery_slot_power_{n}",
+    )
+    _channel_dev_id = pb_field_group(
+        pb.panel_backup_ch1_Info,
+        match="panel_backup_ch{n}_Info",
+        count=NUM_OF_CHANNELS,
+        transform=_backup_channel_dev_id,
+        name_template="_ch{n}_dev_id",
+    )
+
+    channel_sn = field_group(
+        _channel_battery("_battery_slot_sn_{n}"),
+        NUM_OF_CHANNELS,
+        name_template="channel{n}_sn",
+    )
+    channel_battery_percentage = field_group(
+        _channel_battery("_battery_slot_soc_{n}"),
+        NUM_OF_CHANNELS,
+        name_template="channel{n}_battery_percentage",
+    )
+    channel_output_power = field_group(
+        _channel_battery("_battery_slot_power_{n}"),
+        NUM_OF_CHANNELS,
+        name_template="channel{n}_output_power",
+    )
+
+    # Per-channel enable state, driving the switch control below. ch_sta is the
+    # enable/connected status (None for an empty channel); the switch writes ctrl_en.
+    channel_is_enabled = pb_field_group(
+        pb.panel_backup_ch1_Info,
+        match="panel_backup_ch{n}_Info",
+        count=NUM_OF_CHANNELS,
+        transform=_channel_enabled,
+        name_template="ch{n}_is_enabled",
+    )
+
+    channel_type = pb_field_group(
+        pb.panel_backup_ch1_Info,
+        match="panel_backup_ch{n}_Info",
+        count=NUM_OF_CHANNELS,
+        transform=_channel_type,
+        name_template="ch{n}_type",
+    )
+    channel_force_charge = pb_field_group(
+        pb.panel_backup_ch1_Info,
+        match="panel_backup_ch{n}_Info",
+        count=NUM_OF_CHANNELS,
+        transform=_channel_force_charging,
+        name_template="ch{n}_force_charge",
+    )
+    channel_signal_line = pb_field_group(
+        pb.panel_backup_ch1_Info,
+        match="panel_backup_ch{n}_Info",
+        count=NUM_OF_CHANNELS,
+        transform=_channel_signal_connected,
+        name_template="ch{n}_signal_line",
+    )
+
+    ac_charging_speed = pb_field(pb.panel_max_charge_pow_set)
+    ac_charging_power_min = 600
+    ac_charging_power_max = 12000
+    ac_charging_speed_step = 100
+
+    storm_guard = pb_field(pb.storm_pattern_enable)
+
+    _device_error_info = pb_field(pb.dev_errcode_list)
+
+    _mode_panel = pb_field(
+        pb.panle_energy_strategy_operate_mode, _operating_mode_from_message
+    )
+    _mode_generic = pb_field(
+        pb.energy_strategy_operate_mode, _operating_mode_from_message
+    )
+    eps_mode = pb_field(
+        pb.panle_energy_strategy_operate_mode.operate_eps_mode,
+        TransformIfMissing(bool),
+    )
+    _mix_scheduled = pb_field(
+        pb.panle_energy_strategy_operate_mode.operate_mix_scheduled_open,
+        TransformIfMissing(bool),
+    )
+
+    @computed_field
+    def device_error_codes(self) -> list[int]:
+        if self._device_error_info is None:
+            return []
+        return list(self._device_error_info.dev_errcode)
+
+    @computed_field
+    def error_occurred(self) -> bool:
+        return any(self.device_error_codes)
+
+    @computed_field
+    def operating_mode_select(self) -> OperatingMode | None:
+        if self._mode_panel is not None:
+            return self._mode_panel
+        return self._mode_generic
+
+    def _parse_telemetry(self, body: bytes) -> None:
+        self.update_from_bytes(dev_apl_comm_pb2.DisplayPropertyUpload, body)
+
+    @controls.battery(
+        battery_charge_limit_min,
+        max=dynamic(battery_charge_limit_max),
+    )
+    async def set_battery_charge_limit_min(self, limit: float):
+        await self._send_config_packet(
+            dev_apl_comm_pb2.ConfigWrite(cfg_min_dsg_soc=int(limit))
+        )
+        return True
+
+    @controls.battery(
+        battery_charge_limit_max,
+        min=dynamic(battery_charge_limit_min),
+    )
+    async def set_battery_charge_limit_max(self, limit: float):
+        await self._send_config_packet(
+            dev_apl_comm_pb2.ConfigWrite(cfg_max_chg_soc=int(limit))
+        )
+        return True
+
+    @controls.battery(backup_reserve_level, max=100)
+    async def set_backup_reserve_level(self, value: float):
+        await self._send_config_packet(
+            dev_apl_comm_pb2.ConfigWrite(cfg_backup_reverse_soc=int(value))
+        )
+        return True
+
+    @controls.power(
+        ac_charging_speed,
+        min=ac_charging_power_min,
+        max=ac_charging_power_max,
+        step=ac_charging_speed_step,
+    )
+    async def set_ac_charging_speed(self, value: float):
+        watts = int(value) // self.ac_charging_speed_step * self.ac_charging_speed_step
+        await self._send_config_packet(
+            dev_apl_comm_pb2.ConfigWrite(cfg_panel_max_charge_pow_set=watts)
+        )
+        return True
+
+    @controls.for_each(
+        circuit_is_enabled,
+        control=controls.outlet,
+        availability=circuit_split_info_loaded,
+        translation_key="circuit_is_enabled",
+        translation_placeholders=lambda i: {"circuit": f"{i:02d}"},
+        name_field=lambda i: f"circuit_name_{i}",
+    )
+    async def set_circuit_power(self, circuit_id: int, enable: bool):
+        self._logger.debug("set_circuit_power for %d: %s", circuit_id, enable)
+        config = self._build_circuit_power_config(circuit_id, enable)
+        if config is not None:
+            await self._send_config_packet(config)
+        return True
+
+    @controls.select(operating_mode_select, options=OperatingMode)
+    async def set_operating_mode(self, mode: OperatingMode):
+        if mode is OperatingMode.UNKNOWN:
+            return
+
+        await self._write_energy_strategy(mode, bool(self.eps_mode))
+
+    @controls.switch(storm_guard)
+    async def set_storm_guard(self, enable: bool):
+        config = dev_apl_comm_pb2.ConfigWrite()
+        config.cfg_storm_pattern.storm_pattern_enable = enable
+        await self._send_config_packet(config)
+
+    @controls.switch(eps_mode)
+    async def set_eps_mode(self, enable: bool):
+        """Toggle EPS (fast-cutover) mode, preserving the operating mode"""
+        await self._write_energy_strategy(self.operating_mode_select, enable)
+
+    @controls.for_each(
+        channel_force_charge,
+        control=controls.switch,
+        translation_key="ch_force_charge",
+        translation_placeholders=lambda i: {"channel": str(i)},
+    )
+    async def set_channel_force_charge(self, channel_id: int, enable: bool):
+        """Force-charge (Charge Now in the EcoFlow app) a backup channel"""
+        await self._write_backup_channel_ctrl(
+            channel_id,
+            enable=bool(self.channel_is_enabled[channel_id]),
+            force_charge=enable,
+        )
+
+    @controls.for_each(
+        channel_is_enabled,
+        control=controls.switch,
+        translation_key="channel_is_enabled",
+        translation_placeholders=lambda i: {"channel": str(i)},
+    )
+    async def set_channel_enable(self, channel_id: int, enable: bool):
+        await self._write_backup_channel_ctrl(
+            channel_id,
+            enable=enable,
+            force_charge=bool(self.channel_force_charge[channel_id]),
+        )
+
+    async def _write_energy_strategy(
+        self, mode: OperatingMode | None, eps_enable: bool
+    ):
+        config = dev_apl_comm_pb2.ConfigWrite()
+        message = config.cfg_panle_energy_strategy_operate_mode
+        message.operate_self_powered_open = mode is OperatingMode.SELF_POWERED
+        message.operate_scheduled_open = mode is OperatingMode.SCHEDULED
+        message.operate_intelligent_schedule_mode_open = (
+            mode is OperatingMode.INTELLIGENT
+        )
+        message.operate_eps_mode = eps_enable
+        message.operate_mix_scheduled_open = bool(self._mix_scheduled)
+        await self._send_config_packet(config)
+
+    async def _write_backup_channel_ctrl(
+        self, channel_id: int, *, enable: bool, force_charge: bool
+    ):
+        config = dev_apl_comm_pb2.ConfigWrite()
+        ctrl = pb_indexed_attr(
+            config, pb_cfg.cfg_panel_backup_ch1_ctrl, "cfg_panel_backup_ch{n}_ctrl"
+        )
+        backup = ctrl[channel_id]
+        backup.ctrl_en = 1 if enable else 2
+        backup.ctrl_force_chg = 1 if force_charge else 2
+        await self._send_config_packet(config)
