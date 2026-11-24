@@ -252,3 +252,24 @@ async def test_ocean_panel_does_not_decode_other_commands_as_uploads(device):
     await device.data_parse(_post(upload(pow_get_sys_load=6.0), command=0x19))
 
     assert device.load_system == 730.3
+
+
+@pytest.mark.parametrize(
+    ("include_third_party", "expected"),
+    [(True, 3283.0), (False, 3000.0)],
+)
+async def test_ocean_panel_pv_total_follows_third_party_option(
+    device, include_third_party, expected
+):
+    device.with_advanced_options(
+        {"include_third_party_pv_in_solar": include_third_party}
+    )
+    await device.data_parse(
+        _post(
+            dev_apl_comm_pb2.DisplayPropertyUpload(
+                pow_get_pv_sum=3283.0, pow_exter_pv_inv_in_w=283.0
+            )
+        )
+    )
+
+    assert device.pv_power_sum == expected

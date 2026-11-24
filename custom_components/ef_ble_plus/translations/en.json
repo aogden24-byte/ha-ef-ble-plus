@@ -278,11 +278,13 @@
             "description": "Advanced options specific to this device model. Only change these if you know what you are doing.",
             "data": {
               "unlock_ac_charging_minimum": "Unlock AC charging speed minimum",
-              "unlock_dc_charging_minimum": "Unlock DC charging speed minimum"
+              "unlock_dc_charging_minimum": "Unlock DC charging speed minimum",
+              "include_third_party_pv_in_solar": "Count third-party solar inverters as solar"
             },
             "data_description": {
               "unlock_ac_charging_minimum": "Allows setting the AC charging speed below the minimum the EcoFlow app enforces. 1 W stops the device drawing from the grid without unplugging it, which is what solar-surplus automations need; charging that slowly is less efficient and may generate additional heat.",
-              "unlock_dc_charging_minimum": "⚠️ WARNING: this may damage your device. The EcoFlow app limits are likely there for a reason, and running the DC input below them for long periods can wear its components; damage caused this way may not be covered by warranty. Use at your own risk.\n\nAllows setting the DC charging speed below the minimum the EcoFlow app enforces, down to 0 A. 0 A is not off: the device can still draw a small current from the input. The value caps the current drawn from the DC input, so a lower one keeps the device within what a weak source can give - a fuse-limited car socket, a small supply or a single panel - instead of stalling it by asking for more."
+              "unlock_dc_charging_minimum": "⚠️ WARNING: this may damage your device. The EcoFlow app limits are likely there for a reason, and running the DC input below them for long periods can wear its components; damage caused this way may not be covered by warranty. Use at your own risk.\n\nAllows setting the DC charging speed below the minimum the EcoFlow app enforces, down to 0 A. 0 A is not off: the device can still draw a small current from the input. The value caps the current drawn from the DC input, so a lower one keeps the device within what a weak source can give - a fuse-limited car socket, a small supply or a single panel - instead of stalling it by asking for more.",
+              "include_third_party_pv_in_solar": "Keeps the panel's own solar total, which adds power on circuits assigned \"Third-party solar inverter\" to the PV strings. Turn off when that inverter is fed from storage rather than its own panels, so the total only counts the OCEAN Pro's PV strings. Third-party inverter power stays available as its own sensor."
             }
           },
           "diagnostics_options": {

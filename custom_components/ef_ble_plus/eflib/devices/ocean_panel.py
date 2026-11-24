@@ -1,8 +1,10 @@
 from google.protobuf.message import DecodeError, Message
 
+from ..devicebase import DeviceOption
 from ..entity import controls
 from ..pb import dev_apl_comm_pb2
 from ..props import (
+    computed_field,
     pb_field,
     pb_field_group,
     proto_attr_mapper,
@@ -13,6 +15,11 @@ from ._v4_device import CircuitStatus, GridStatus, TelemetryFrame, V4ProtocolDev
 
 pb = proto_attr_mapper(dev_apl_comm_pb2.DisplayPropertyUpload)
 pb_rt = proto_attr_mapper(dev_apl_comm_pb2.RuntimePropertyUpload)
+
+# Whether `pv_power_sum` keeps the panel's total, which counts circuits assigned
+# "Third-party solar inverter" as solar. Off for a third-party inverter fed from
+# storage, where that power is not new production.
+INCLUDE_THIRD_PARTY_PV = DeviceOption("include_third_party_pv_in_solar", default=True)
 _PV_STRING_FIELD_PREFIX = "dt_pv"
 
 
@@ -27,6 +34,7 @@ class Device(V4ProtocolDevice):
         return True
 
     NUM_OF_CIRCUITS = 40
+    ADVANCED_OPTIONS = (INCLUDE_THIRD_PARTY_PV,)
     _TELEMETRY_SRC = 0x30
 
     battery_level = pb_field(pb.cms_batt_soc, pround(2))
@@ -37,11 +45,26 @@ class Device(V4ProtocolDevice):
     home_load = pb_field(pb.pow_home_load, pround(2))
     sub_panel_load = pb_field(pb.pow_sub_panel_load_w, pround(2))
     ev_load = pb_field(pb.pow_ev_load_w, pround(2))
-    pv_power_sum = pb_field(pb.pow_get_pv_sum, pround(2))
+    # The panel's PV total includes `external_pv_power`: captures show it equal to the
+    # third-party inverter power overnight, with every PV string at 0 W.
+    _reported_pv_power_sum = pb_field(pb.pow_get_pv_sum, pround(2))
     # Power on circuits assigned "Third-party solar inverter" in the installer app.
     # Uploads are incremental and a live capture shows uploads omitting it while it is
     # non-zero, so a missing field means "unchanged", not zero.
     external_pv_power = pb_field(pb.pow_exter_pv_inv_in_w, pround(2))
+
+    @computed_field
+    def pv_power_sum(self) -> float | None:
+        reported = self._reported_pv_power_sum
+        if (
+            reported is None
+            or self.external_pv_power is None
+            or self.advanced_option(INCLUDE_THIRD_PARTY_PV)
+        ):
+            return reported
+        # The two arrive in separate incremental uploads, so the difference can dip
+        # below zero for one update after the external power rises.
+        return round(max(reported - self.external_pv_power, 0.0), 2)
 
     remaining_time_charging = pb_field(pb.cms_chg_rem_time)
     remaining_time_discharging = pb_field(pb.cms_dsg_rem_time)
